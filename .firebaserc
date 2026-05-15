@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "default": "botridge"
+  },
+  "targets": {
+    "botridge": {
+      "hosting": {
+        "biofeedbackloop": [
+          "biofeedbackloop"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}

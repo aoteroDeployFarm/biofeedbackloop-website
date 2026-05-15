@@ -1,0 +1,84 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --font-source-serif: "Source Serif 4", Georgia, serif;
+    --font-inter: "Inter", system-ui, sans-serif;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-canvas text-ink font-sans antialiased;
+    font-feature-settings: "kern" 1, "liga" 1;
+  }
+
+  h1, h2, h3 {
+    @apply font-serif;
+  }
+
+  ::selection {
+    @apply bg-accent-amber/30 text-ink;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-accent-azure ring-offset-2 ring-offset-canvas;
+  }
+}
+
+@layer components {
+  .prose-narrative {
+    @apply font-serif text-body-lg text-ink leading-relaxed max-w-prose;
+  }
+
+  .label-caps {
+    @apply font-sans text-label uppercase tracking-widest text-ink-faint;
+  }
+
+  .card-base {
+    @apply bg-white rounded-2xl shadow-card border border-surface-muted p-6;
+    transition: box-shadow 0.2s ease, transform 0.2s ease;
+  }
+
+  .card-base:hover {
+    @apply shadow-card-hover;
+    transform: translateY(-2px);
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center gap-2 bg-ink text-canvas px-6 py-3 rounded-xl font-sans text-body-sm font-medium;
+    @apply transition-all duration-200 hover:bg-accent-azure;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center gap-2 text-ink-light px-4 py-2 rounded-lg font-sans text-body-sm;
+    @apply transition-all duration-200 hover:text-ink hover:bg-surface-warm;
+  }
+
+  .section-spacer {
+    @apply py-20 md:py-28 lg:py-36;
+  }
+
+  .container-site {
+    @apply max-w-site mx-auto px-4 sm:px-6 lg:px-8;
+  }
+}
+
+/* Subtle texture for canvas background */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg width='200' height='200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.02'/%3E%3C/svg%3E");
+  z-index: 0;
+}
+
+main {
+  position: relative;
+  z-index: 1;
+}

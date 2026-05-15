@@ -1,0 +1,91 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Public CMS collections (read-only, no auth required) ─────────────────
+
+    // Founder experiment entries — the /journey page reads these publicly.
+    // Only admin accounts may write.
+    match /founder_experiments/{docId} {
+      allow read: if resource.data.published == true;
+      allow write: if isAdmin();
+    }
+
+    // Ingredient price index — the /meals calculator reads these publicly.
+    // Only admin accounts may write.
+    match /price_index/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // ── Users collection ─────────────────────────────────────────────────────
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+
+      match /signals/{signalId} {
+        allow read: if isOwner(userId);
+
+        allow create: if isOwner(userId) && validSignal(request.resource.data);
+
+        // Signals are append-only.
+        allow update, delete: if false;
+      }
+
+      // Family sharing locked until the data model is finalized.
+      match /family/{document=**} {
+        allow read, write: if false;
+      }
+    }
+
+    // ── Admin collection (precisionneural.systems only) ───────────────────────
+    match /admin/{document=**} {
+      allow read, write: if isAdmin();
+    }
+
+    // ── Deny everything else ─────────────────────────────────────────────────
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function isOwner(userId) {
+  return request.auth != null && request.auth.uid == userId;
+}
+
+function isAdmin() {
+  return request.auth != null
+    && request.auth.token.email.matches('.*@precisionneural\\.systems$');
+}
+
+function validSignal(data) {
+  // Note: the client sanitizer always writes every payload key (null when unset),
+  // so "key not present" checks are kept for safety but null must be permitted
+  // on every optional field — `null is int` evaluates false in Firestore rules.
+  return data.keys().hasAll(['type', 'timestamp', 'payload'])
+    && data.type in ['meal', 'movement', 'sensation']
+    && data.payload is map
+    && (!('satiety' in data.payload)
+        || data.payload.satiety == null
+        || (data.payload.satiety is int
+            && data.payload.satiety >= 1
+            && data.payload.satiety <= 4))
+    && (!('energy_level' in data.payload)
+        || data.payload.energy_level == null
+        || (data.payload.energy_level is int
+            && data.payload.energy_level >= 1
+            && data.payload.energy_level <= 10))
+    && (!('protein_est' in data.payload)
+        || data.payload.protein_est == null
+        || (data.payload.protein_est is number
+            && data.payload.protein_est >= 0
+            && data.payload.protein_est <= 500))
+    && (!('cost_est' in data.payload)
+        || data.payload.cost_est == null
+        || (data.payload.cost_est is number
+            && data.payload.cost_est >= 0
+            && data.payload.cost_est <= 9999));
+}
