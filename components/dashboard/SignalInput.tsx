@@ -29,6 +29,13 @@ function currentTime(): string {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
+const PROCESSING_STEPS = [
+  "Encoding audio signatures…",
+  "Analyzing voice tokens with Gemini…",
+  "Extracting meal metrics & structure…",
+  "Polishing timeline alignment…",
+] as const;
+
 const MEAL_TYPES = ["Breakfast", "Lunch", "Dinner", "Snack"] as const;
 
 const CONTEXT_TAGS = [
@@ -125,9 +132,10 @@ export default function SignalInput() {
 
   // ── Voice recording state ────────────────────────────────────────────────
   type VoiceState = "idle" | "recording" | "processing";
-  const [voiceState, setVoiceState]   = useState<VoiceState>("idle");
-  const [voiceError, setVoiceError]   = useState<string | null>(null);
+  const [voiceState, setVoiceState]     = useState<VoiceState>("idle");
+  const [voiceError, setVoiceError]     = useState<string | null>(null);
   const [micSupported, setMicSupported] = useState(false);
+  const [processingStep, setProcessingStep] = useState(0);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef   = useRef<Blob[]>([]);
@@ -142,6 +150,18 @@ export default function SignalInput() {
       typeof MediaRecorder !== "undefined"
     );
   }, []);
+
+  // Advance processing step label every 2.5 s while transcription is in flight
+  useEffect(() => {
+    if (voiceState !== "processing") {
+      setProcessingStep(0);
+      return;
+    }
+    const id = setInterval(() => {
+      setProcessingStep((s) => Math.min(s + 1, PROCESSING_STEPS.length - 1));
+    }, 2500);
+    return () => clearInterval(id);
+  }, [voiceState]);
 
   function showVoiceError(msg: string) {
     setVoiceError(msg);
@@ -229,10 +249,16 @@ export default function SignalInput() {
   }
 
   function handleMicClick() {
-    if (voiceState === "idle")     return startRecording();
+    if (voiceState === "idle")      return startRecording();
     if (voiceState === "recording") return stopRecording();
     // "processing" — tap is ignored; spinner shows progress
   }
+
+  // Fire-and-forget OPTIONS ping to wake the Cloud Run instance before the
+  // user finishes speaking — eliminates cold-start latency on the actual POST.
+  const preWarmContainer = useCallback(() => {
+    fetch("/api/transcribeMeal", { method: "OPTIONS" }).catch(() => {});
+  }, []);
 
   // Track mount time for the clock-reset button
   const [mountTime] = useState<string>(() => currentTime());
@@ -336,13 +362,13 @@ export default function SignalInput() {
               {/* Status text — sits to the left of the icon */}
               <span className="font-sans text-label pr-1">
                 {voiceState === "recording" && (
-                  <span className="text-accent-azure animate-pulse">
-                    Listening…
+                  <span className="text-xs font-medium text-red-600">
+                    🔴 Tap mic again to finish &amp; log
                   </span>
                 )}
                 {voiceState === "processing" && (
                   <span className="text-ink-faint animate-pulse">
-                    Translating…
+                    {PROCESSING_STEPS[processingStep]}
                   </span>
                 )}
                 {voiceState === "idle" && aiLoading && (
@@ -361,17 +387,19 @@ export default function SignalInput() {
                   type="button"
                   onClick={handleMicClick}
                   disabled={voiceState === "processing"}
+                  onMouseEnter={preWarmContainer}
+                  onTouchStart={preWarmContainer}
                   aria-label={
                     voiceState === "recording" ? "Stop recording" : "Start voice input"
                   }
                   style={{ minWidth: 44, minHeight: 44 }}
                   className={cn(
-                    "pointer-events-auto flex items-center justify-center rounded-xl transition-colors duration-200",
+                    "pointer-events-auto flex items-center justify-center transition-all duration-200",
                     voiceState === "recording"
-                      ? "text-accent-azure animate-pulse"
+                      ? "animate-pulse text-red-500 bg-red-50 rounded-full p-1"
                       : voiceState === "processing"
-                      ? "text-ink-faint cursor-default"
-                      : "text-ink-faint hover:text-ink"
+                      ? "text-ink-faint cursor-default rounded-xl"
+                      : "text-ink-faint hover:text-ink rounded-xl"
                   )}
                 >
                   {voiceState === "processing"
@@ -387,6 +415,13 @@ export default function SignalInput() {
           {voiceError && (
             <p className="font-sans text-label text-ink-faint mt-1">
               {voiceError}
+            </p>
+          )}
+
+          {/* Processing timeline anchor — sets expectation during transcription */}
+          {voiceState === "processing" && (
+            <p className="font-sans text-label text-ink-faint/50 mt-1">
+              AI generation typically takes 6–10 seconds.
             </p>
           )}
         </div>

@@ -305,25 +305,54 @@ exports.transcribeMeal = (0, https_1.onRequest)({
                     parts: [
                         { inlineData: { mimeType: resolvedMime, data: audio } },
                         {
-                            text: "Transcribe exactly what is spoken in this audio. Return only the spoken words as plain text — no commentary, no labels, no punctuation changes.",
+                            text: `Analyze this audio recording of a user logging meals or biometric observations.
+Return a JSON object that strictly follows this schema — no markdown fences, no explanation:
+{
+  "rawTranscript": "<exact literal transcription of the spoken words>",
+  "isDone": <boolean>
+}
+
+CRITICAL RULE FOR "isDone":
+Set "isDone" to true ONLY if the user utters an explicit sign-off keyword at the very end of their speech: "done", "log it", or "sync". If none of these exact words appear, set "isDone" to false.`,
                         },
                     ],
                 },
             ],
             config: {
-                maxOutputTokens: 256,
+                maxOutputTokens: 512,
                 temperature: 0.0,
+                responseMimeType: "application/json",
                 thinkingConfig: { thinkingBudget: 0 },
                 safetySettings,
             },
         });
+        // Collect raw output — parts array is more reliable than response.text
         const parts = response.candidates?.[0]?.content?.parts ?? [];
-        const text = parts.length > 0
+        const raw = parts.length > 0
             ? parts.map((p) => p.text ?? "").join("").trim()
             : (response.text?.trim() ?? "");
+        if (!raw) {
+            res.status(404).json({ error: "No speech detected in the recording" });
+            return;
+        }
+        // Parse structured output — extractJSON strips any residual markdown fences
+        let parsed;
+        try {
+            parsed = JSON.parse(extractJSON(raw));
+        }
+        catch {
+            console.error("[transcribeMeal] JSON parse failed — raw:", raw.slice(0, 200));
+            // Graceful fallback: treat the raw string as the transcript
+            parsed = { rawTranscript: raw, isDone: false };
+        }
+        let text = (parsed.rawTranscript ?? "").trim();
         if (!text) {
             res.status(404).json({ error: "No speech detected in the recording" });
             return;
+        }
+        // Strip sign-off keyword + any trailing punctuation/whitespace when flagged
+        if (parsed.isDone) {
+            text = text.replace(/[\s.,!?]*(done|log\s+it|sync)[\s.,!?]*$/i, "").trim();
         }
         res.json({ text });
     }
