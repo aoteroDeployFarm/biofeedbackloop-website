@@ -1,0 +1,85 @@
+specVersion: v1alpha1
+params:
+  - type: secret
+    name: GEMINI_API_KEY
+  - type: secret
+    name: OPENBRAIN_DATABASE_URL
+requiredAPIs: []
+extensions: {}
+endpoints:
+  parseMeal:
+    platform: gcfv2
+    region:
+      - us-central1
+    availableMemoryMb: 256
+    timeoutSeconds: 20
+    minInstances: null
+    maxInstances: null
+    ingressSettings: null
+    concurrency: null
+    serviceAccountEmail: null
+    vpc: null
+    labels: {}
+    secretEnvironmentVariables:
+      - key: GEMINI_API_KEY
+      - key: OPENBRAIN_DATABASE_URL
+    callableTrigger: {}
+    entryPoint: parseMeal
+  generateInsight:
+    platform: gcfv2
+    region:
+      - us-central1
+    availableMemoryMb: 256
+    timeoutSeconds: 30
+    minInstances: null
+    maxInstances: null
+    ingressSettings: null
+    concurrency: null
+    serviceAccountEmail: null
+    vpc: null
+    labels: {}
+    secretEnvironmentVariables:
+      - key: GEMINI_API_KEY
+    httpsTrigger: {}
+    entryPoint: generateInsight
+  transcribeMeal:
+    platform: gcfv2
+    region:
+      - us-central1
+    availableMemoryMb: 512
+    timeoutSeconds: 30
+    minInstances: null
+    maxInstances: null
+    ingressSettings: null
+    concurrency: null
+    serviceAccountEmail: null
+    vpc: null
+    labels: {}
+    secretEnvironmentVariables:
+      - key: GEMINI_API_KEY
+    httpsTrigger: {}
+    entryPoint: transcribeMeal
+  mirrorSignalOnCreate:
+    platform: gcfv2
+    region:
+      - us-central1
+    availableMemoryMb: 256
+    timeoutSeconds: 15
+    minInstances: null
+    maxInstances: null
+    ingressSettings: null
+    concurrency: null
+    serviceAccountEmail: null
+    vpc: null
+    labels: {}
+    secretEnvironmentVariables:
+      - key: OPENBRAIN_DATABASE_URL
+    eventTrigger:
+      eventType: google.cloud.firestore.document.v1.created
+      eventFilters:
+        database: "(default)"
+        namespace: "(default)"
+      eventFilterPathPatterns:
+        document: "users/{uid}/signals/{signalId}"
+      retry: false
+    entryPoint: mirrorSignalOnCreate

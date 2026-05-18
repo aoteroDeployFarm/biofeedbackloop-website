@@ -7,15 +7,17 @@
   },
   "main": "lib/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/gen-manifest.js",
     "build:watch": "tsc --watch",
     "predeploy": "npm run build"
   },
   "dependencies": {
     "@google-cloud/vertexai": "^1.7.0",
     "@google/genai": "^1.52.0",
+    "@types/pg": "^8.20.0",
     "firebase-admin": "^12.3.0",
-    "firebase-functions": "^5.1.0"
+    "firebase-functions": "^7.2.5",
+    "pg": "^8.20.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
