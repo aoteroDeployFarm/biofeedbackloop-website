@@ -28,8 +28,12 @@ service cloud.firestore {
 
         allow create: if isOwner(userId) && validSignal(request.resource.data);
 
-        // Signals are append-only.
-        allow update, delete: if false;
+        // Payload-only updates are allowed; type and timestamp must not change.
+        allow update: if isOwner(userId)
+          && request.resource.data.type == resource.data.type
+          && request.resource.data.timestamp == resource.data.timestamp;
+
+        allow delete: if false;
       }
 
       // Family sharing locked until the data model is finalized.

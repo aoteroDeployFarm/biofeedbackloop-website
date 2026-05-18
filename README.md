@@ -12,7 +12,7 @@ A personal signal-tracking app for observing how food affects satiety, energy, a
 | Hosting | Firebase Hosting (`biofeedbackloop` target, project `botridge`) |
 | Auth | Firebase Auth — Google SSO |
 | Database | Cloud Firestore — real-time, user-siloed (`users/${uid}/signals`) |
-| Functions | Firebase Functions v2 (`onCall`, `us-central1`) |
+| Functions | Firebase Functions v2 (`onRequest` + `onCall`, `us-central1`) |
 | AI | Google Generative AI SDK (`@google/genai`) — `gemini-2.5-flash` |
 | State | Zustand with optimistic UI + Firestore `onSnapshot` |
 | Charts | Recharts (lazy-loaded, `ssr: false`) |
@@ -50,13 +50,13 @@ components/
   journey/             ExperimentsTimeline, ReflectionCard
   meals/               ProteinCalculator
 functions/src/
-  index.ts             parseMeal, generateInsight (Cloud Functions v2)
+  index.ts             parseMeal (onCall), generateInsight, transcribeMeal (onRequest)
 lib/
-  firebase/            config, auth, firestore, functions
+  firebase/            config, auth, firestore, functions (fetch wrappers)
   firestore-helpers.ts toFirestore() — undefined→null sanitizer
 store/
-  signalStore.ts       Zustand store + buildChartData aggregation
-firestore.rules        User-siloed rules + validSignal validator
+  signalStore.ts       Zustand store, addSignal, updateSignal, buildChartData
+firestore.rules        User-siloed rules, validSignal validator, payload-update rule
 ```
 
 ---
@@ -74,7 +74,31 @@ Accepts a free-text meal description, returns structured nutrition estimates.
 ### `generateInsight`
 Reads the user's last 5 signals from Firestore, returns a 2-sentence observational pattern insight.
 
+- **Trigger**: `onRequest` (HTTP POST) — auth via Bearer token, `admin.auth().verifyIdToken()`
 - **Voice**: Non-judgmental, systems-thinker perspective. Banned words: "great", "optimize", "should", "cheat"
+- **Client**: `fetch("/api/generateInsight")` — same-origin via Firebase Hosting rewrite
+
+### `transcribeMeal`
+Accepts a base64-encoded audio blob, transcribes it via Gemini 2.5 Flash multimodal, returns plain text.
+
+- **Trigger**: `onRequest` (HTTP POST) — auth via Bearer token
+- **Input**: `{ audio: string (base64), mimeType: string }`
+- **Output**: `{ text: string }`
+- **Client**: `fetch("/api/transcribeMeal")` — same-origin via Firebase Hosting rewrite
+
+---
+
+## API Layer Architecture
+
+The client communicates with all backend functions via **same-origin reverse-proxy routes** (`/api/*`) rather than cross-origin SDK calls. Firebase Hosting rewrites forward these requests to the appropriate Cloud Function at request time, completely eliminating CORS preflight checks in production.
+
+```
+Browser → /api/transcribeMeal  ─┐
+Browser → /api/generateInsight ─┤─ Firebase Hosting rewrites ──► Cloud Run (onRequest)
+Browser → Firestore SDK         ┘  (same origin, no preflight)
+```
+
+`parseMeal` remains `onCall` (Firebase SDK) as it is invoked in the background and does not require the same-origin proxy.
 
 ---
 
@@ -106,20 +130,29 @@ All payload fields are written as `null` (never `undefined`) via `toFirestore()`
 
 ## Firestore Rules
 
-Signals are **append-only** — `update` and `delete` are denied at the rules layer. The `validSignal` function validates type, required keys, and numeric ranges for optional fields (all of which also accept `null`).
+Signals support **payload-only updates** for delayed telemetry (energy, hunger return, bloating logged after the meal). The `update` rule allows patching sub-fields as long as `type` and `timestamp` are unchanged. `delete` remains denied. The `validSignal` function validates type, required keys, and numeric ranges on create.
 
 ---
 
 ## Deployment
 
 ```bash
-# Full deploy (hosting + functions + rules)
-npm run build
-firebase deploy --only hosting:biofeedbackloop,functions:biofeedbackloop,firestore:rules --project botridge
+# Frontend only
+firebase deploy --only hosting --project botridge
 
-# Rules only (instant, no build needed)
+# Single function (always compile first)
+cd functions && npm run build && cd .. && firebase deploy --only functions:transcribeMeal --project botridge
+cd functions && npm run build && cd .. && firebase deploy --only functions:generateInsight --project botridge
+
+# Rules only (no build needed)
 firebase deploy --only firestore:rules --project botridge
+
+# Full deploy
+cd functions && npm run build && cd ..
+firebase deploy --only hosting,functions,firestore:rules --project botridge
 ```
+
+> See `CLAUDE.md` for the full deployment SOP, trigger-migration procedure, and incremental build notes.
 
 ---
 

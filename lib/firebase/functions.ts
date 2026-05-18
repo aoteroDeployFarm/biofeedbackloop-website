@@ -1,5 +1,5 @@
 import { getFunctions, httpsCallable, connectFunctionsEmulator } from "firebase/functions";
-import app from "./config";
+import app, { auth } from "./config";
 
 const functions = getFunctions(app, "us-central1");
 
@@ -40,10 +40,75 @@ export interface GenerateInsightResult {
   insight: string | null;
 }
 
-export const generateInsightFn = httpsCallable<Record<string, never>, GenerateInsightResult>(
-  functions,
-  "generateInsight"
-);
+export async function generateInsightFn(
+  _input: Record<string, never>
+): Promise<{ data: GenerateInsightResult }> {
+  const user = auth.currentUser;
+  if (!user) throw new Error("Not authenticated");
+
+  const idToken = await user.getIdToken();
+
+  const response = await fetch("/api/generateInsight", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${idToken}`,
+    },
+    body: JSON.stringify({}),
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({})) as { error?: string };
+    throw new Error(body.error ?? `Insight unavailable (${response.status})`);
+  }
+
+  const data = await response.json() as GenerateInsightResult;
+  return { data };
+}
+
+// ── transcribeMeal ────────────────────────────────────────────────────────────
+//
+// Uses a plain fetch to /api/transcribeMeal — a same-origin path that Firebase
+// Hosting rewrites to the transcribeMeal Cloud Function. This completely
+// bypasses cross-origin preflight checks. Auth is sent as a Bearer token in
+// the Authorization header and verified server-side by the Admin SDK.
+
+export interface TranscribeMealInput {
+  /** Raw audio encoded as base64 (no data-URI prefix). */
+  audio: string;
+  /** MIME type reported by MediaRecorder (e.g. "audio/webm", "audio/mp4"). */
+  mimeType: string;
+}
+
+export interface TranscribeMealResult {
+  text: string;
+}
+
+export async function transcribeMealFn(
+  input: TranscribeMealInput
+): Promise<{ data: TranscribeMealResult }> {
+  const user = auth.currentUser;
+  if (!user) throw new Error("Not authenticated");
+
+  const idToken = await user.getIdToken();
+
+  const response = await fetch("/api/transcribeMeal", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${idToken}`,
+    },
+    body: JSON.stringify(input),
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({})) as { error?: string };
+    throw new Error(body.error ?? `Transcription failed (${response.status})`);
+  }
+
+  const data = await response.json() as TranscribeMealResult;
+  return { data };
+}
 
 // Satiety potential → label used in SignalInput
 export const SATIETY_LABELS: Record<number, string> = {

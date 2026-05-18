@@ -33,7 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.generateInsight = exports.parseMeal = void 0;
+exports.transcribeMeal = exports.generateInsight = exports.parseMeal = void 0;
 const https_1 = require("firebase-functions/v2/https");
 const params_1 = require("firebase-functions/params");
 const admin = __importStar(require("firebase-admin"));
@@ -148,12 +148,39 @@ JSON:`;
     return result;
 });
 // ── generateInsight ───────────────────────────────────────────────────────────
-exports.generateInsight = (0, https_1.onCall)({ region: "us-central1", timeoutSeconds: 30, memory: "256MiB", secrets: [GEMINI_API_KEY] }, async (request) => {
-    console.log("[generateInsight] invoked — auth present:", !!request.auth);
-    if (!request.auth) {
-        throw new https_1.HttpsError("unauthenticated", "Sign in to use the AI observer.");
+exports.generateInsight = (0, https_1.onRequest)({
+    region: "us-central1",
+    timeoutSeconds: 30,
+    memory: "256MiB",
+    secrets: [GEMINI_API_KEY],
+    cors: true,
+}, async (req, res) => {
+    const validPath = req.path === "/" || req.path === "/api/generateInsight";
+    if (!validPath) {
+        res.status(404).json({ error: "Not found" });
+        return;
     }
-    const uid = request.auth.uid;
+    if (req.method !== "POST") {
+        res.status(405).json({ error: "Method not allowed" });
+        return;
+    }
+    // Verify Firebase ID token from Authorization header
+    const authHeader = req.headers["authorization"];
+    const idToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    if (!idToken) {
+        res.status(401).json({ error: "Unauthenticated" });
+        return;
+    }
+    let uid;
+    try {
+        const decoded = await admin.auth().verifyIdToken(idToken);
+        uid = decoded.uid;
+    }
+    catch {
+        res.status(403).json({ error: "Invalid or expired token" });
+        return;
+    }
+    console.log("[generateInsight] invoked — uid:", uid);
     const snap = await admin
         .firestore()
         .collection("users")
@@ -164,7 +191,8 @@ exports.generateInsight = (0, https_1.onCall)({ region: "us-central1", timeoutSe
         .get();
     if (snap.empty) {
         console.log("[generateInsight] no signals — returning null");
-        return { insight: null };
+        res.json({ insight: null });
+        return;
     }
     const signals = snap.docs.map((doc) => {
         const d = doc.data();
@@ -190,7 +218,6 @@ Recent meal signals (newest first):
 ${JSON.stringify(signals, null, 2)}
 
 Return only the observation text — no labels, no JSON, no markdown.`;
-    let insight;
     try {
         console.log("[generateInsight] calling ai.models.generateContent");
         const response = await ai.models.generateContent({
@@ -202,17 +229,109 @@ Return only the observation text — no labels, no JSON, no markdown.`;
                 safetySettings,
             },
         });
-        insight = response.text?.trim() ?? null;
+        const insight = response.text?.trim() ?? null;
         console.log("[generateInsight] insight length:", insight?.length ?? 0);
+        res.json({ insight });
     }
     catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         const stack = err instanceof Error ? err.stack : undefined;
         console.error("[generateInsight] GenAI error:", msg);
         console.error("[generateInsight] Full stack:", stack ?? "(no stack)");
-        throw new https_1.HttpsError("internal", "AI service unavailable.");
+        res.status(500).json({ error: "AI service unavailable." });
     }
-    return { insight };
+});
+// ── transcribeMeal ────────────────────────────────────────────────────────────
+//
+// Accepts a base64-encoded audio blob (webm / mp4 / ogg / wav) from the client,
+// passes it to Gemini's multimodal endpoint as inline data, and returns the
+// raw transcription string. No files are written to disk or Cloud Storage —
+// the buffer lives only in the Function's memory for the duration of the call.
+const SUPPORTED_AUDIO_TYPES = [
+    "audio/webm", "audio/mp4", "audio/mpeg", "audio/mp3",
+    "audio/ogg", "audio/wav", "audio/flac", "audio/aac",
+];
+// Exposed as an onRequest function so the Firebase Hosting rewrite at
+// /api/transcribeMeal can proxy it same-origin, eliminating CORS entirely.
+// Auth is verified manually via the Firebase Admin SDK ID-token check.
+exports.transcribeMeal = (0, https_1.onRequest)({
+    region: "us-central1",
+    timeoutSeconds: 30,
+    memory: "512MiB",
+    secrets: [GEMINI_API_KEY],
+    cors: true,
+}, async (req, res) => {
+    // Accept requests arriving directly at the function root ("/") and via
+    // the Cloud Run proxy path ("/api/transcribeMeal") so both routing
+    // layers resolve to the same handler without a 404.
+    const validPath = req.path === "/" || req.path === "/api/transcribeMeal";
+    if (!validPath) {
+        res.status(404).json({ error: "Not found" });
+        return;
+    }
+    if (req.method !== "POST") {
+        res.status(405).json({ error: "Method not allowed" });
+        return;
+    }
+    // Verify Firebase ID token from Authorization header
+    const authHeader = req.headers["authorization"];
+    const idToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    if (!idToken) {
+        res.status(401).json({ error: "Unauthenticated" });
+        return;
+    }
+    try {
+        await admin.auth().verifyIdToken(idToken);
+    }
+    catch {
+        res.status(403).json({ error: "Invalid or expired token" });
+        return;
+    }
+    const { audio, mimeType } = req.body;
+    if (!audio?.trim()) {
+        res.status(400).json({ error: "No audio data received" });
+        return;
+    }
+    const resolvedMime = SUPPORTED_AUDIO_TYPES.includes(mimeType ?? "")
+        ? mimeType
+        : "audio/webm";
+    const ai = new genai_1.GoogleGenAI({ apiKey: GEMINI_API_KEY.value() });
+    try {
+        const response = await ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: [
+                {
+                    role: "user",
+                    parts: [
+                        { inlineData: { mimeType: resolvedMime, data: audio } },
+                        {
+                            text: "Transcribe exactly what is spoken in this audio. Return only the spoken words as plain text — no commentary, no labels, no punctuation changes.",
+                        },
+                    ],
+                },
+            ],
+            config: {
+                maxOutputTokens: 256,
+                temperature: 0.0,
+                thinkingConfig: { thinkingBudget: 0 },
+                safetySettings,
+            },
+        });
+        const parts = response.candidates?.[0]?.content?.parts ?? [];
+        const text = parts.length > 0
+            ? parts.map((p) => p.text ?? "").join("").trim()
+            : (response.text?.trim() ?? "");
+        if (!text) {
+            res.status(404).json({ error: "No speech detected in the recording" });
+            return;
+        }
+        res.json({ text });
+    }
+    catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error("[transcribeMeal] GenAI error:", msg);
+        res.status(500).json({ error: "Transcription unavailable. Try typing instead." });
+    }
 });
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function clampInt(value, min, max) {

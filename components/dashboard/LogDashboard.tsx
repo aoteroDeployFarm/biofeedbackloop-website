@@ -9,6 +9,7 @@ import { useSignalStore } from "@/store/signalStore";
 import SignalInput from "./SignalInput";
 import RecentSignalsFeed from "./RecentSignalsFeed";
 import CalmObservation from "./CalmObservation";
+import InsightsCard from "./InsightsCard";
 import DashboardErrorBoundary from "./DashboardErrorBoundary";
 import dynamic from "next/dynamic";
 
@@ -131,11 +132,14 @@ export default function LogDashboard() {
           <DashboardErrorBoundary><TrendChart /></DashboardErrorBoundary>
         </div>
 
-        {/* Protein + satiety insights */}
-        <DashboardErrorBoundary><InsightsGraph /></DashboardErrorBoundary>
+        {/* Programmatic pattern observations */}
+        <DashboardErrorBoundary><InsightsCard /></DashboardErrorBoundary>
 
         {/* AI Calm Observation */}
         <DashboardErrorBoundary><CalmObservation /></DashboardErrorBoundary>
+
+        {/* Chart view */}
+        <DashboardErrorBoundary><InsightsGraph /></DashboardErrorBoundary>
 
         {/* Recent feed */}
         <DashboardErrorBoundary><RecentSignalsFeed /></DashboardErrorBoundary>

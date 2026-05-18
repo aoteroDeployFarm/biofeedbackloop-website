@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { Clock, Plus, ChevronDown, Sparkles } from "lucide-react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { Clock, ChevronDown, Mic, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/components/auth/AuthProvider";
 import { useSignalStore } from "@/store/signalStore";
@@ -13,153 +13,282 @@ import {
 } from "@/lib/firebase/firestore";
 import {
   parseMealFn,
+  transcribeMealFn,
   SATIETY_LABELS,
   type ParseMealResult,
 } from "@/lib/firebase/functions";
-import AISuggestionPill from "./AISuggestionPill";
+
+// ── Module-level helpers (defined before any useState that calls them) ────────
 
 type SatietyLevel = "light" | "satisfied" | "full" | "stuffed";
 
-// Module-level — no component state dependency.
-// Must be defined BEFORE any useState call that uses it as an initializer,
-// otherwise the lazy initializer hits the TDZ and throws in production.
 function currentTime(): string {
   const d = new Date();
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+const MEAL_TYPES = ["Breakfast", "Lunch", "Dinner", "Snack"] as const;
+
+const CONTEXT_TAGS = [
+  "Ate fast", "Ate out", "Social meal", "Stress eating", "Post-workout",
+] as const;
+
+const SATIETY_OPTIONS: { value: SatietyLevel; label: string; sub: string }[] = [
+  { value: "light",     label: "Light",     sub: "Could eat more" },
+  { value: "satisfied", label: "Satisfied", sub: "Comfortable, done" },
+  { value: "full",      label: "Full",      sub: "Noticeably full" },
+  { value: "stuffed",   label: "Stuffed",   sub: "Uncomfortable" },
+];
+
+const PORTION_OPTIONS = ["Small", "Medium", "Large", "Extra Large"];
+const ENERGY_OPTIONS  = ["Low", "Moderate", "Steady", "High"];
+const HUNGER_OPTIONS  = ["1 hr", "2 hrs", "3 hrs", "4 hrs", "4+ hrs", "Not tracked"];
+const BLOATING_OPTIONS = ["None", "Mild", "Moderate", "Notable"];
+
+// ── Form state ────────────────────────────────────────────────────────────────
+
 interface FormState {
   foods: string;
-  time: string;
-  portion: string;
   satiety: SatietyLevel | "";
+  // drawer fields
+  time: string;
+  mealType: string;
+  contextTags: string[];
+  portion: string;
+  proteinEst: string;
+  costEst: string;
   hungerReturn: string;
   energyLevel: string;
   bloating: string;
-  proteinEst: string;
-  costEst: string;
 }
 
-const satietyOptions: { value: SatietyLevel; label: string; description: string }[] = [
-  { value: "light", label: "Light", description: "Could eat more" },
-  { value: "satisfied", label: "Satisfied", description: "Comfortable, done" },
-  { value: "full", label: "Full", description: "Stomach noticeably full" },
-  { value: "stuffed", label: "Stuffed", description: "Uncomfortable fullness" },
-];
-
-const portionOptions = ["Small", "Medium", "Large", "Extra Large"];
-const energyOptions = ["Low", "Moderate", "Steady", "High"];
-const hungerOptions = ["1 hr", "2 hrs", "3 hrs", "4 hrs", "4+ hrs", "Not tracked"];
-const bloatingOptions = ["None", "Mild", "Moderate", "Notable"];
-
-// time is seeded at runtime — see useState initializer in the component
 const defaultForm: Omit<FormState, "time"> = {
   foods: "",
-  portion: "Medium",   // pre-selected; user can override
   satiety: "",
+  mealType: "",
+  contextTags: [],
+  portion: "Medium",
+  proteinEst: "",
+  costEst: "",
   hungerReturn: "",
   energyLevel: "",
   bloating: "",
-  proteinEst: "",
-  costEst: "",
 };
 
-function SelectPill({ options, value, onChange }: {
-  options: string[];
-  value: string;
-  onChange: (v: string) => void;
-}) {
+// ── Sub-components ────────────────────────────────────────────────────────────
+
+function Pill({
+  label, active, onClick,
+}: { label: string; active: boolean; onClick: () => void }) {
   return (
-    <div className="flex flex-wrap gap-2">
-      {options.map((opt) => (
-        <button
-          key={opt}
-          type="button"
-          onClick={() => onChange(opt === value ? "" : opt)}
-          className={cn(
-            "px-3 py-1.5 rounded-lg text-body-sm font-sans border transition-all duration-150",
-            value === opt
-              ? "bg-ink text-canvas border-ink"
-              : "bg-white text-ink-light border-surface-muted hover:border-accent-azure hover:text-accent-azure"
-          )}
-        >
-          {opt}
-        </button>
-      ))}
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "px-3 py-1.5 rounded-lg font-sans text-body-sm border transition-all duration-150 shrink-0",
+        active
+          ? "bg-ink text-canvas border-ink"
+          : "bg-white text-ink-light border-surface-muted hover:border-ink/30 hover:text-ink"
+      )}
+    >
+      {label}
+    </button>
+  );
+}
+
+function FieldLabel({ label, hint }: { label: string; hint?: string }) {
+  return (
+    <div className="space-y-0.5 mb-2">
+      <p className="label-caps">{label}</p>
+      {hint && <p className="font-sans text-label text-ink-faint">{hint}</p>}
     </div>
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="space-y-2">
-      <label className="label-caps block">{label}</label>
-      {children}
-    </div>
-  );
-}
+// ── Main component ────────────────────────────────────────────────────────────
 
 export default function SignalInput() {
   const { user } = useAuth();
   const { addSignal } = useSignalStore();
-  const [form, setForm] = useState<FormState>(() => ({ ...defaultForm, time: currentTime() }));
+
+  const [form, setForm]       = useState<FormState>(() => ({ ...defaultForm, time: currentTime() }));
+  const [saving, setSaving]   = useState(false);
   const [submitted, setSubmitted] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [expanded, setExpanded] = useState(true);
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
-  // AI analysis state
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiResult, setAiResult] = useState<ParseMealResult | null>(null);
-  const [aiError, setAiError] = useState<string | null>(null);
+  // AI state — silent background analysis
+  const [aiLoading, setAiLoading]   = useState(false);
+  const [aiApplied, setAiApplied]   = useState(false); // shows "Signals estimated" hint
+  const aiTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Snapshot of the time when this form instance was mounted — used as the default
-  const [mountTime] = useState<string>(() => currentTime());
+  // ── Voice recording state ────────────────────────────────────────────────
+  type VoiceState = "idle" | "recording" | "processing";
+  const [voiceState, setVoiceState]   = useState<VoiceState>("idle");
+  const [voiceError, setVoiceError]   = useState<string | null>(null);
+  const [micSupported, setMicSupported] = useState(false);
 
-  async function analyzeWithAI() {
-    if (!form.foods.trim() || form.foods.trim().length < 5 || !user) return;
-    setAiLoading(true);
-    setAiResult(null);
-    setAiError(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef   = useRef<Blob[]>([]);
+  const streamRef        = useRef<MediaStream | null>(null);
+  const capTimerRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Detect browser support after mount (avoids SSR mismatch)
+  useEffect(() => {
+    setMicSupported(
+      typeof navigator !== "undefined" &&
+      !!navigator.mediaDevices?.getUserMedia &&
+      typeof MediaRecorder !== "undefined"
+    );
+  }, []);
+
+  function showVoiceError(msg: string) {
+    setVoiceError(msg);
+    setTimeout(() => setVoiceError(null), 4500);
+  }
+
+  function stopStream() {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+  }
+
+  /** Convert a Blob to a raw base64 string (no data-URI prefix). */
+  function blobToBase64(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUri = reader.result as string;
+        resolve(dataUri.split(",")[1] ?? "");
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  /** Best MIME type the current browser can record. */
+  function getAudioMimeType(): string {
+    const candidates = ["audio/webm", "audio/mp4", "audio/mpeg", "audio/ogg"];
+    return candidates.find((t) => MediaRecorder.isTypeSupported(t)) ?? "";
+  }
+
+  async function processAudio(mimeType: string) {
+    setVoiceState("processing");
     try {
-      const { data } = await parseMealFn({ description: form.foods.trim() });
-      setAiResult(data);
-    } catch (e) {
-      const raw = e instanceof Error ? e.message : "";
-      // Firebase callable errors surface as "FirebaseError: ... (functions/code)" or with a message property
-      const friendly =
-        raw.includes("failed-precondition") || raw.includes("Vertex AI")
-          ? "AI estimation is being configured — it will be available shortly. Continue logging manually."
-          : raw.includes("unauthenticated")
-          ? "Sign in to use AI estimation."
-          : raw.includes("internal") || raw === ""
-          ? "AI analysis unavailable right now. Continue logging manually."
-          : raw;
-      setAiError(friendly);
+      const blob    = new Blob(audioChunksRef.current, { type: mimeType });
+      const base64  = await blobToBase64(blob);
+      const { data } = await transcribeMealFn({ audio: base64, mimeType });
+      if (data.text?.trim()) {
+        setForm((prev) => ({ ...prev, foods: data.text.trim() }));
+        setAiApplied(false); // reset so the new text re-triggers AI analysis
+      } else {
+        showVoiceError("Voice signal unreadable. Try typing instead.");
+      }
+    } catch {
+      showVoiceError("Voice signal unreadable. Try typing instead.");
     } finally {
-      setAiLoading(false);
+      audioChunksRef.current = [];
+      setVoiceState("idle");
     }
   }
 
-  function handleAcceptAI(result: ParseMealResult) {
-    setForm((prev) => ({
-      ...prev,
-      proteinEst: String(result.protein_grams),
-      satiety: (SATIETY_LABELS[result.satiety_potential] as SatietyLevel) || prev.satiety,
-    }));
-    setAiResult(null);
+  async function startRecording() {
+    if (!user) return;
+    try {
+      const stream   = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const mimeType = getAudioMimeType();
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current   = [];
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+      recorder.onstop = () => {
+        stopStream();
+        processAudio(mimeType || "audio/webm");
+      };
+
+      recorder.start(250); // collect in 250 ms chunks for smooth stop
+      setVoiceState("recording");
+
+      // Hard 30-second cap
+      capTimerRef.current = setTimeout(() => stopRecording(), 30_000);
+    } catch {
+      showVoiceError("Mic access denied. Try typing instead.");
+      setVoiceState("idle");
+    }
   }
 
-  function handleDismissAI() {
-    setAiResult(null);
-    setAiError(null);
+  function stopRecording() {
+    if (capTimerRef.current) clearTimeout(capTimerRef.current);
+    if (mediaRecorderRef.current?.state === "recording") {
+      mediaRecorderRef.current.stop();
+    }
   }
+
+  function handleMicClick() {
+    if (voiceState === "idle")     return startRecording();
+    if (voiceState === "recording") return stopRecording();
+    // "processing" — tap is ignored; spinner shows progress
+  }
+
+  // Track mount time for the clock-reset button
+  const [mountTime] = useState<string>(() => currentTime());
+
+  // ── Debounced auto-AI ────────────────────────────────────────────────────
+
+  const triggerAI = useCallback(async (description: string) => {
+    if (!user) return;
+    setAiLoading(true);
+    setAiApplied(false);
+    try {
+      const { data }: { data: ParseMealResult } = await parseMealFn({ description });
+      setForm((prev) => ({
+        ...prev,
+        // Only backfill if field is still empty — never clobber a manual entry
+        proteinEst: prev.proteinEst || String(data.protein_grams),
+        satiety: prev.satiety || (SATIETY_LABELS[data.satiety_potential] as SatietyLevel) || prev.satiety,
+      }));
+      setAiApplied(true);
+    } catch {
+      // Silent fail — user never sees an error for background analysis
+    } finally {
+      setAiLoading(false);
+    }
+  }, [user]);
+
+  useEffect(() => {
+    if (aiTimerRef.current) clearTimeout(aiTimerRef.current);
+    const trimmed = form.foods.trim();
+    if (trimmed.length >= 5 && user) {
+      aiTimerRef.current = setTimeout(() => triggerAI(trimmed), 1500);
+    }
+    return () => {
+      if (aiTimerRef.current) clearTimeout(aiTimerRef.current);
+    };
+  }, [form.foods, user, triggerAI]);
+
+  // ── Context tag toggle ───────────────────────────────────────────────────
+
+  function toggleTag(tag: string) {
+    setForm((prev) => ({
+      ...prev,
+      contextTags: prev.contextTags.includes(tag)
+        ? prev.contextTags.filter((t) => t !== tag)
+        : [...prev.contextTags, tag],
+    }));
+  }
+
+  // ── Submit ───────────────────────────────────────────────────────────────
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!user || !form.foods) return;
+    if (!user || !form.foods.trim()) return;
     setSaving(true);
     await addSignal(user.uid, "meal", {
-      foods: form.foods,
+      foods: form.foods.trim(),
       satiety: form.satiety ? (mapSatietyLabel(form.satiety) as SatietyScore) : null,
       portion: form.portion || null,
       hunger_return_hrs: form.hungerReturn && form.hungerReturn !== "Not tracked"
@@ -169,193 +298,314 @@ export default function SignalInput() {
       bloating: form.bloating || null,
       protein_est: form.proteinEst ? parseFloat(form.proteinEst) : null,
       cost_est: form.costEst ? parseFloat(form.costEst) : null,
+      meal_type: form.mealType || null,
+      context_tags: form.contextTags.length ? form.contextTags : null,
       notes: null,
     });
     setSaving(false);
     setSubmitted(true);
     setForm({ ...defaultForm, time: currentTime() });
-    setAiResult(null);
-    setAiError(null);
+    setAiApplied(false);
+    setDrawerOpen(false);
     setTimeout(() => setSubmitted(false), 3000);
   }
 
+  // ── Render ───────────────────────────────────────────────────────────────
+
   return (
     <div className="bg-white rounded-3xl shadow-card border border-surface-muted overflow-hidden">
-      {/* Header */}
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center justify-between p-6 text-left hover:bg-surface-warm transition-colors"
-      >
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-xl bg-accent-azure/10 flex items-center justify-center">
-            <Plus size={16} className="text-accent-azure" />
+
+      {/* ── Always-visible baseline ── */}
+      <form onSubmit={handleSubmit} className="p-6 space-y-5">
+
+        {/* Foods */}
+        <div className="space-y-2">
+          <p className="label-caps">What did you eat?</p>
+          <div className="relative">
+            <textarea
+              rows={2}
+              value={form.foods}
+              onChange={(e) => setForm({ ...form, foods: e.target.value })}
+              placeholder="Turkey sandwich, Greek yogurt, sparkling water…"
+              className="w-full rounded-xl border border-surface-muted bg-surface-warm px-4 py-3 font-sans text-body-sm text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent-azure resize-none pr-12"
+            />
+
+            {/* Bottom-right overlay: status text + mic/spinner icon */}
+            <div className="absolute bottom-0 right-0 flex items-center pointer-events-none">
+
+              {/* Status text — sits to the left of the icon */}
+              <span className="font-sans text-label pr-1">
+                {voiceState === "recording" && (
+                  <span className="text-accent-azure animate-pulse">
+                    Listening…
+                  </span>
+                )}
+                {voiceState === "processing" && (
+                  <span className="text-ink-faint animate-pulse">
+                    Translating…
+                  </span>
+                )}
+                {voiceState === "idle" && aiLoading && (
+                  <span className="text-ink-faint animate-pulse">
+                    Reading signals…
+                  </span>
+                )}
+                {voiceState === "idle" && !aiLoading && aiApplied && (
+                  <span className="text-accent-azure/70">✦ Estimated</span>
+                )}
+              </span>
+
+              {/* Mic button / spinner — 44×44 touch target */}
+              {micSupported && (
+                <button
+                  type="button"
+                  onClick={handleMicClick}
+                  disabled={voiceState === "processing"}
+                  aria-label={
+                    voiceState === "recording" ? "Stop recording" : "Start voice input"
+                  }
+                  style={{ minWidth: 44, minHeight: 44 }}
+                  className={cn(
+                    "pointer-events-auto flex items-center justify-center rounded-xl transition-colors duration-200",
+                    voiceState === "recording"
+                      ? "text-accent-azure animate-pulse"
+                      : voiceState === "processing"
+                      ? "text-ink-faint cursor-default"
+                      : "text-ink-faint hover:text-ink"
+                  )}
+                >
+                  {voiceState === "processing"
+                    ? <Loader2 size={14} className="animate-spin" />
+                    : <Mic size={14} />
+                  }
+                </button>
+              )}
+            </div>
           </div>
-          <div>
-            <p className="font-serif text-body-lg font-semibold text-ink">Log a Meal Signal</p>
-            <p className="font-sans text-body-sm text-ink-light">Capture what happened, not what should have.</p>
+
+          {/* Voice error — soft, auto-dismissing */}
+          {voiceError && (
+            <p className="font-sans text-label text-ink-faint mt-1">
+              {voiceError}
+            </p>
+          )}
+        </div>
+
+        {/* Satiety — always visible */}
+        <div>
+          <p className="label-caps mb-2">How did it land?</p>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            {SATIETY_OPTIONS.map((s) => (
+              <button
+                key={s.value}
+                type="button"
+                onClick={() => setForm({ ...form, satiety: form.satiety === s.value ? "" : s.value })}
+                className={cn(
+                  "text-left px-3 py-2.5 rounded-xl border transition-all duration-150",
+                  form.satiety === s.value
+                    ? "bg-ink text-canvas border-ink"
+                    : "bg-white border-surface-muted text-ink-light hover:border-ink/30 hover:text-ink"
+                )}
+              >
+                <p className="font-sans text-body-sm font-medium leading-tight">{s.label}</p>
+                <p className="font-sans text-label text-current opacity-60 mt-0.5">{s.sub}</p>
+              </button>
+            ))}
           </div>
         </div>
-        <ChevronDown
-          size={18}
-          className={cn("text-ink-faint transition-transform duration-200", expanded ? "rotate-180" : "rotate-0")}
-        />
-      </button>
 
-      {expanded && (
-        <form onSubmit={handleSubmit} className="p-6 pt-0 space-y-6 border-t border-surface-muted">
-          {/* Foods + time */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-4">
-            <div className="sm:col-span-2">
-              <Field label="Foods eaten">
-                <textarea
-                  rows={2}
-                  value={form.foods}
-                  onChange={(e) => setForm({ ...form, foods: e.target.value })}
-                  placeholder="Turkey sandwich, Greek yogurt, sparkling water…"
-                  className="w-full rounded-xl border border-surface-muted bg-surface-warm px-4 py-3 font-sans text-body-sm text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent-azure resize-none"
-                />
-              </Field>
-            </div>
-            <div className="space-y-2">
-              <div className="space-y-0.5">
-                <label className="label-caps block">Time</label>
-                <p className="font-sans text-label text-ink-faint">
-                  Defaults to now · update if logging later
-                </p>
+        {/* Submit row */}
+        <div className="flex items-center justify-between gap-3">
+          <button
+            type="submit"
+            disabled={!form.foods.trim() || saving || !user}
+            className={cn(
+              "btn-primary",
+              (!form.foods.trim() || saving || !user) && "opacity-40 cursor-not-allowed"
+            )}
+          >
+            {saving ? "Saving…" : submitted ? "Observation recorded." : "Save Signal"}
+          </button>
+
+          {submitted && (
+            <p className="font-sans text-body-sm text-ink-faint">
+              No judgment attached.
+            </p>
+          )}
+
+          {/* Optional detail toggle */}
+          {!submitted && (
+            <button
+              type="button"
+              onClick={() => setDrawerOpen(!drawerOpen)}
+              className="flex items-center gap-1.5 font-sans text-body-sm text-ink-faint hover:text-ink transition-colors ml-auto"
+            >
+              <span>{drawerOpen ? "Less detail" : "Add detail"}</span>
+              <ChevronDown
+                size={14}
+                className={cn("transition-transform duration-200", drawerOpen ? "rotate-180" : "")}
+              />
+            </button>
+          )}
+        </div>
+
+        {/* ── Optional drawer ── */}
+        {drawerOpen && (
+          <div className="space-y-5 pt-4 border-t border-surface-muted">
+
+            {/* Meal type — segmented control */}
+            <div>
+              <FieldLabel label="Meal type" />
+              <div className="flex gap-2 flex-wrap">
+                {MEAL_TYPES.map((t) => (
+                  <Pill
+                    key={t}
+                    label={t}
+                    active={form.mealType === t}
+                    onClick={() => setForm({ ...form, mealType: form.mealType === t ? "" : t })}
+                  />
+                ))}
               </div>
-              <div className="flex gap-2">
+            </div>
+
+            {/* Context tags */}
+            <div>
+              <FieldLabel label="Context" hint="Select all that apply" />
+              <div className="flex flex-wrap gap-2">
+                {CONTEXT_TAGS.map((tag) => (
+                  <Pill
+                    key={tag}
+                    label={tag}
+                    active={form.contextTags.includes(tag)}
+                    onClick={() => toggleTag(tag)}
+                  />
+                ))}
+              </div>
+            </div>
+
+            {/* Protein + Cost */}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <FieldLabel
+                  label="Protein est."
+                  hint={aiApplied ? "AI estimated · override freely" : "grams"}
+                />
+                <input
+                  type="number"
+                  min="0"
+                  max="300"
+                  step="1"
+                  value={form.proteinEst}
+                  onChange={(e) => setForm({ ...form, proteinEst: e.target.value })}
+                  placeholder="34"
+                  className={cn(
+                    "w-full rounded-xl border bg-surface-warm px-4 py-3 font-sans text-body-sm text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent-azure",
+                    aiApplied && !form.proteinEst ? "border-accent-azure/30" : "border-surface-muted"
+                  )}
+                />
+              </div>
+              <div>
+                <FieldLabel label="Cost est." hint="USD" />
+                <input
+                  type="number"
+                  min="0"
+                  max="999"
+                  step="0.01"
+                  value={form.costEst}
+                  onChange={(e) => setForm({ ...form, costEst: e.target.value })}
+                  placeholder="2.40"
+                  className="w-full rounded-xl border border-surface-muted bg-surface-warm px-4 py-3 font-sans text-body-sm text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent-azure"
+                />
+              </div>
+            </div>
+
+            {/* Portion */}
+            <div>
+              <FieldLabel label="Portion size" />
+              <div className="flex flex-wrap gap-2">
+                {PORTION_OPTIONS.map((opt) => (
+                  <Pill
+                    key={opt}
+                    label={opt}
+                    active={form.portion === opt}
+                    onClick={() => setForm({ ...form, portion: form.portion === opt ? "" : opt })}
+                  />
+                ))}
+              </div>
+            </div>
+
+            {/* Post-meal signals */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
+              <div>
+                <FieldLabel label="Hunger return" />
+                <div className="flex flex-wrap gap-2">
+                  {HUNGER_OPTIONS.map((opt) => (
+                    <Pill
+                      key={opt}
+                      label={opt}
+                      active={form.hungerReturn === opt}
+                      onClick={() => setForm({ ...form, hungerReturn: form.hungerReturn === opt ? "" : opt })}
+                    />
+                  ))}
+                </div>
+              </div>
+              <div>
+                <FieldLabel label="Energy 90 min later" />
+                <div className="flex flex-wrap gap-2">
+                  {ENERGY_OPTIONS.map((opt) => (
+                    <Pill
+                      key={opt}
+                      label={opt}
+                      active={form.energyLevel === opt}
+                      onClick={() => setForm({ ...form, energyLevel: form.energyLevel === opt ? "" : opt })}
+                    />
+                  ))}
+                </div>
+              </div>
+              <div>
+                <FieldLabel label="Bloating / discomfort" />
+                <div className="flex flex-wrap gap-2">
+                  {BLOATING_OPTIONS.map((opt) => (
+                    <Pill
+                      key={opt}
+                      label={opt}
+                      active={form.bloating === opt}
+                      onClick={() => setForm({ ...form, bloating: form.bloating === opt ? "" : opt })}
+                    />
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Time — lowest priority, end of drawer */}
+            <div>
+              <FieldLabel label="Time" hint="Defaults to now · update if logging later" />
+              <div className="flex gap-2 max-w-[200px]">
                 <input
                   type="time"
                   value={form.time}
                   onChange={(e) => setForm({ ...form, time: e.target.value })}
-                  className="flex-1 rounded-xl border border-surface-muted bg-surface-warm px-4 py-3 font-sans text-body-sm text-ink focus:outline-none focus:border-accent-azure"
+                  className="flex-1 rounded-xl border border-surface-muted bg-surface-warm px-4 py-2.5 font-sans text-body-sm text-ink focus:outline-none focus:border-accent-azure"
                 />
                 <button
                   type="button"
                   onClick={() => setForm({ ...form, time: currentTime() })}
                   className={cn(
-                    "p-3 rounded-xl border transition-colors",
+                    "p-2.5 rounded-xl border transition-colors",
                     form.time !== mountTime
-                      ? "border-accent-azure/40 bg-accent-azure/8 text-accent-azure hover:border-accent-azure"
-                      : "border-surface-muted bg-surface-warm text-ink-faint hover:text-accent-azure hover:border-accent-azure"
+                      ? "border-accent-azure/40 bg-accent-azure/8 text-accent-azure"
+                      : "border-surface-muted bg-surface-warm text-ink-faint hover:text-accent-azure"
                   )}
                   title="Reset to current time"
                 >
-                  <Clock size={16} />
+                  <Clock size={15} />
                 </button>
               </div>
             </div>
+
           </div>
-
-          {/* AI analysis button */}
-          <button
-            type="button"
-            onClick={analyzeWithAI}
-            disabled={!form.foods.trim() || form.foods.trim().length < 5 || aiLoading || !user}
-            className={cn(
-              "flex items-center gap-2 px-4 py-2.5 rounded-xl border font-sans text-body-sm transition-all duration-150",
-              form.foods.trim().length >= 5 && !aiLoading && user
-                ? "border-accent-azure/30 text-accent-azure hover:bg-accent-azure/8 hover:border-accent-azure/60"
-                : "border-surface-muted text-ink-faint cursor-not-allowed opacity-50"
-            )}
-          >
-            <Sparkles size={14} />
-            {aiLoading ? "Analyzing…" : "Estimate with AI"}
-          </button>
-
-          {/* AI suggestion pill */}
-          <AISuggestionPill
-            result={aiResult}
-            loading={aiLoading}
-            error={aiError}
-            onAccept={handleAcceptAI}
-            onDismiss={handleDismissAI}
-          />
-
-          <Field label="Portion size (estimate)">
-            <SelectPill options={portionOptions} value={form.portion} onChange={(v) => setForm({ ...form, portion: v })} />
-          </Field>
-
-          {/* Protein + cost */}
-          <div className="grid grid-cols-2 gap-4">
-            <Field label="Protein est. (g)">
-              <input
-                type="number"
-                min="0"
-                max="200"
-                step="1"
-                value={form.proteinEst}
-                onChange={(e) => setForm({ ...form, proteinEst: e.target.value })}
-                placeholder="e.g. 34"
-                className="w-full rounded-xl border border-surface-muted bg-surface-warm px-4 py-3 font-sans text-body-sm text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent-azure"
-              />
-            </Field>
-            <Field label="Cost est. ($)">
-              <input
-                type="number"
-                min="0"
-                max="999"
-                step="0.01"
-                value={form.costEst}
-                onChange={(e) => setForm({ ...form, costEst: e.target.value })}
-                placeholder="e.g. 2.40"
-                className="w-full rounded-xl border border-surface-muted bg-surface-warm px-4 py-3 font-sans text-body-sm text-ink placeholder:text-ink-faint focus:outline-none focus:border-accent-azure"
-              />
-            </Field>
-          </div>
-
-          {/* Satiety */}
-          <Field label="Satiety at end of meal">
-            <div className="grid grid-cols-2 gap-2">
-              {satietyOptions.map((s) => (
-                <button
-                  key={s.value}
-                  type="button"
-                  onClick={() => setForm({ ...form, satiety: form.satiety === s.value ? "" : s.value })}
-                  className={cn(
-                    "text-left p-3 rounded-xl border transition-all duration-150",
-                    form.satiety === s.value
-                      ? "bg-accent-azure/10 border-accent-azure text-ink"
-                      : "bg-white border-surface-muted text-ink-light hover:border-accent-azure/50"
-                  )}
-                >
-                  <p className="font-sans text-body-sm font-medium">{s.label}</p>
-                  <p className="font-sans text-label text-ink-faint mt-0.5">{s.description}</p>
-                </button>
-              ))}
-            </div>
-          </Field>
-
-          {/* Feedback row */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-5 pt-2 border-t border-surface-muted">
-            <Field label="Hunger return">
-              <SelectPill options={hungerOptions} value={form.hungerReturn} onChange={(v) => setForm({ ...form, hungerReturn: v })} />
-            </Field>
-            <Field label="Energy 90 min later">
-              <SelectPill options={energyOptions} value={form.energyLevel} onChange={(v) => setForm({ ...form, energyLevel: v })} />
-            </Field>
-            <Field label="Bloating / discomfort">
-              <SelectPill options={bloatingOptions} value={form.bloating} onChange={(v) => setForm({ ...form, bloating: v })} />
-            </Field>
-          </div>
-
-          {/* Submit */}
-          <div className="flex items-center gap-3 pt-2">
-            <button
-              type="submit"
-              disabled={!form.foods || saving || !user}
-              className={cn("btn-primary", (!form.foods || saving || !user) && "opacity-40 cursor-not-allowed")}
-            >
-              {saving ? "Saving…" : submitted ? "Signal logged." : "Save Signal"}
-            </button>
-            {submitted && (
-              <p className="font-sans text-body-sm text-accent-azure animate-fade-in">
-                Observation recorded. No judgment attached.
-              </p>
-            )}
-          </div>
-        </form>
-      )}
+        )}
+      </form>
     </div>
   );
 }

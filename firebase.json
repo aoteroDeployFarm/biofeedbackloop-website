@@ -17,6 +17,14 @@
       ],
       "rewrites": [
         {
+          "source": "/api/transcribeMeal",
+          "function": "transcribeMeal"
+        },
+        {
+          "source": "/api/generateInsight",
+          "function": "generateInsight"
+        },
+        {
           "source": "**",
           "destination": "/index.html"
         }

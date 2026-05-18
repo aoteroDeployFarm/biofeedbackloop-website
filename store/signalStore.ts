@@ -5,6 +5,7 @@ import {
   type SignalType,
   type SignalPayload,
   writeSignal,
+  enrichSignal,
   subscribeToSignals,
 } from "@/lib/firebase/firestore";
 import { toFirestore } from "@/lib/firestore-helpers";
@@ -18,6 +19,10 @@ interface SignalState {
   // Optimistically add a signal, then persist to Firestore.
   // On failure, the temporary entry is removed and error is set.
   addSignal: (uid: string, type: SignalType, payload: SignalPayload) => Promise<void>;
+
+  // Optimistically patch specific payload fields, then persist via updateDoc.
+  // On failure, the in-memory change is rolled back and error is set.
+  updateSignal: (uid: string, signalId: string, fields: Partial<SignalPayload>) => Promise<void>;
 
   // Subscribe to the Firestore real-time stream for the last `days` days.
   subscribe: (uid: string, days?: number) => void;
@@ -61,6 +66,40 @@ export const useSignalStore = create<SignalState>((set, get) => ({
         signals: s.signals.filter((sig) => sig.id !== tempId),
         error: err instanceof Error ? err.message : "Signal could not be saved.",
       }));
+    }
+  },
+
+  updateSignal: async (uid, signalId, fields) => {
+    const safe = JSON.parse(
+      JSON.stringify(fields, (_k, v) => (v === undefined ? null : v))
+    ) as Partial<SignalPayload>;
+
+    // Snapshot the previous payload for rollback
+    const prev = get().signals.find((s) => s.id === signalId)?.payload;
+
+    // Optimistic in-memory patch
+    set((s) => ({
+      signals: s.signals.map((sig) =>
+        sig.id === signalId
+          ? { ...sig, payload: { ...sig.payload, ...safe } }
+          : sig
+      ),
+    }));
+
+    try {
+      await enrichSignal(uid, signalId, safe);
+    } catch (err) {
+      // Rollback to previous payload if Firestore write fails
+      if (prev !== undefined) {
+        set((s) => ({
+          signals: s.signals.map((sig) =>
+            sig.id === signalId ? { ...sig, payload: prev } : sig
+          ),
+          error: err instanceof Error ? err.message : "Signal could not be updated.",
+        }));
+      } else {
+        set({ error: err instanceof Error ? err.message : "Signal could not be updated." });
+      }
     }
   },
 

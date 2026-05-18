@@ -1,6 +1,8 @@
 import {
   collection,
   addDoc,
+  doc,
+  updateDoc,
   query,
   where,
   orderBy,
@@ -22,11 +24,13 @@ export interface SignalPayload {
   satiety?: SatietyScore | null;
   portion?: string | null;
   hunger_return_hrs?: number | null;
-  energy_level?: number | null; // 1–10
+  energy_level?: number | null;   // 1–10 mapped from label
   bloating?: string | null;
-  protein_est?: number | null; // grams
-  cost_est?: number | null; // USD
+  protein_est?: number | null;    // grams
+  cost_est?: number | null;       // USD
   notes?: string | null;
+  meal_type?: string | null;      // Breakfast | Lunch | Dinner | Snack
+  context_tags?: string[] | null; // e.g. ["Ate fast", "Post-workout"]
 }
 
 export interface Signal {
@@ -46,24 +50,39 @@ export async function writeSignal(
   type: SignalType,
   payload: SignalPayload
 ): Promise<string> {
-  // ── Diagnostic: log raw payload before sanitization ──────────────────────
-  console.log("[DEBUG] writeSignal raw payload keys:", Object.keys(payload));
-  console.log("[DEBUG] payload.portion →", payload.portion, "| type:", typeof payload.portion);
-  console.log("[DEBUG] payload.bloating →", payload.bloating, "| type:", typeof payload.bloating);
-
-  // ── Nuclear sanitizer: JSON round-trip eliminates every undefined ─────────
+  // Nuclear sanitizer: JSON round-trip converts every undefined → null
   const clean: Record<string, unknown> = JSON.parse(
     JSON.stringify(payload, (_key, value) => (value === undefined ? null : value))
   );
 
-  console.log("[DEBUG] clean payload:", JSON.stringify(clean));
-
-  const doc = await addDoc(signalsRef(uid), {
+  const docRef = await addDoc(signalsRef(uid), {
     type,
     timestamp: serverTimestamp(),
     payload: clean,
   });
-  return doc.id;
+  return docRef.id;
+}
+
+export async function enrichSignal(
+  uid: string,
+  signalId: string,
+  patches: Partial<SignalPayload>
+): Promise<void> {
+  // Nuclear sanitizer — converts any undefined values to null
+  const clean: Record<string, unknown> = JSON.parse(
+    JSON.stringify(patches, (_key, value) => (value === undefined ? null : value))
+  );
+
+  // Firestore dot-notation partial update — only touches the specified sub-keys
+  // inside the payload map; never overwrites the whole payload object, and
+  // leaves type / timestamp / AI estimates untouched.
+  const dotPatches: Record<string, unknown> = {};
+  Object.entries(clean).forEach(([k, v]) => {
+    dotPatches[`payload.${k}`] = v;
+  });
+
+  const docRef = doc(db, "users", uid, "signals", signalId);
+  await updateDoc(docRef, dotPatches);
 }
 
 export function subscribeToSignals(
